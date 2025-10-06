@@ -1,83 +1,121 @@
+// server.js
 const express = require("express");
-const fetch = require("node-fetch"); // ✅ v2 — supports .pipe()
+const fetch = require("node-fetch"); // v2 OK for stream piping
 const cors = require("cors");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+const LANGDOCK_API_KEY = process.env.LANGDOCK_API_KEY;
+const ALLOW_ORIGIN = process.env.ALLOW_ORIGIN || "*";
 
-app.use(cors());
-app.use(express.json());
-
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-
-if (!OPENAI_API_KEY) {
-  console.error("❌ Missing OPENAI_API_KEY in environment variables.");
+if (!LANGDOCK_API_KEY) {
+  console.error("❌ Missing LANGDOCK_API_KEY");
   process.exit(1);
 }
 
-// ✅ Special handling for streaming run creation
-app.post("/v1/threads/:thread_id/runs", async (req, res) => {
-  const { thread_id } = req.params;
-  const targetUrl = `https://api.openai.com/v1/threads/${thread_id}/runs`;
+app.use(cors({ origin: ALLOW_ORIGIN, credentials: false }));
+app.use(express.json({ limit: "2mb" }));
 
-  console.log("➡️ Streaming run to:", targetUrl);
+// Health check
+app.get("/health", (_req, res) => res.status(200).send("ok"));
 
+// CORS preflight (if needed)
+app.options("*", (_req, res) => {
+  res.setHeader("Access-Control-Allow-Origin", ALLOW_ORIGIN);
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  res.sendStatus(204);
+});
+
+// --- Main streaming endpoint: forwards to Langdock Assistant API ---
+app.post("/assistant", async (req, res) => {
   try {
-    const openaiRes = await fetch(targetUrl, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${OPENAI_API_KEY}`,
-        "Content-Type": "application/json",
-        "OpenAI-Beta": "assistants=v2",
-      },
-      body: JSON.stringify({
-        ...req.body,
-        stream: true,
-      }),
-    });
+    // Expect: { assistantId, messages: [{role, content, attachmentIds?}, ...], stream: true }
+    const body = {
+      ...req.body,
+      stream: true, // enforce streaming from server side
+    };
 
-    res.setHeader("Content-Type", "text/event-stream");
-    res.setHeader("Cache-Control", "no-cache");
+    const ldRes = await fetch(
+      "https://api.langdock.com/assistant/v1/chat/completions",
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${LANGDOCK_API_KEY}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(body),
+      }
+    );
+
+    // Pass through status if non-200
+    if (!ldRes.ok && ldRes.status !== 200) {
+      const errText = await ldRes.text().catch(() => "");
+      return res.status(ldRes.status).type("application/json").send(errText);
+    }
+
+    // SSE headers
+    res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+    res.setHeader("Cache-Control", "no-cache, no-transform");
     res.setHeader("Connection", "keep-alive");
+    res.flushHeaders?.();
 
-    openaiRes.body.pipe(res); // ✅ now works
+    // Stream pipe
+    ldRes.body.pipe(res);
+
+    // If you prefer manual read to transform lines, use a reader:
+    // const reader = ldRes.body.getReader();
+    // const encoder = new TextEncoder();
+    // for (;;) {
+    //   const { done, value } = await reader.read();
+    //   if (done) break;
+    //   res.write(value);
+    // }
+    // res.end();
   } catch (err) {
-    console.error("Streaming run error:", err);
-    res.status(500).json({ error: "Stream proxy failed", detail: err.message });
+    console.error("Proxy stream error:", err);
+    if (!res.headersSent) {
+      res
+        .status(500)
+        .json({ error: "Stream proxy failed", detail: err.message });
+    } else {
+      try {
+        res.end();
+      } catch (_) {}
+    }
   }
 });
 
-// ✅ All other requests go through regular proxy
-app.all("/v1/*", async (req, res) => {
-  const path = req.path.replace(/^\/v1\//, "");
-  const targetUrl = `https://api.openai.com/v1/${path}`;
-
-  console.log("➡️ Proxying to:", targetUrl);
-  if (req.body && Object.keys(req.body).length) {
-    console.log("📦 Request body:", req.body);
-  }
-
+// (Optional) non-streaming helper endpoint for server-to-server use
+app.post("/assistant-json", async (req, res) => {
   try {
-    const openaiRes = await fetch(targetUrl, {
-      method: req.method,
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${OPENAI_API_KEY}`,
-        "OpenAI-Beta": "assistants=v2",
-      },
-      body: ["GET", "HEAD"].includes(req.method)
-        ? undefined
-        : JSON.stringify(req.body),
-    });
-
-    const data = await openaiRes.json();
-    res.status(openaiRes.status).json(data);
+    const body = { ...req.body, stream: false };
+    const ldRes = await fetch(
+      "https://api.langdock.com/assistant/v1/chat/completions",
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${LANGDOCK_API_KEY}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(body),
+      }
+    );
+    const text = await ldRes.text();
+    res
+      .status(ldRes.status)
+      .type(ldRes.headers.get("content-type") || "application/json")
+      .send(text);
   } catch (err) {
     console.error("Proxy error:", err);
     res.status(500).json({ error: "Proxy failed", detail: err.message });
   }
 });
 
+// (Optional) attachment upload passthrough (multipart/form-data) if you plan to use attachments.
+// Use a multipart lib like busboy/multer here and forward to:
+// POST https://api.langdock.com/assistant/v1/attachment/upload
+// See docs: Upload Attachment API.
 app.listen(PORT, () => {
-  console.log(`✅ Streaming proxy server running on port ${PORT}`);
+  console.log(`✅ Langdock streaming proxy listening on ${PORT}`);
 });
