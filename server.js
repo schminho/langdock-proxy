@@ -147,6 +147,45 @@ app.post("/upload", upload.single("file"), async (req, res) => {
   }
 });
 
+// --- Azure Blob Logging ---
+import { BlobServiceClient } from "@azure/storage-blob";
+
+const AZURE_CONN = process.env.AZURE_STORAGE_CONNECTION_STRING;
+const CONTAINER_NAME = "logs";
+
+async function appendToAzureBlob(entry) {
+  if (!AZURE_CONN) throw new Error("Missing AZURE_STORAGE_CONNECTION_STRING");
+  const blobService = BlobServiceClient.fromConnectionString(AZURE_CONN);
+  const container = blobService.getContainerClient(CONTAINER_NAME);
+
+  // create container if missing
+  await container.createIfNotExists();
+
+  const today = new Date().toISOString().slice(0, 10);
+  const blobName = `logs-${today}.jsonl`;
+  const blobClient = container.getAppendBlobClient(blobName);
+
+  // create blob if missing
+  if (!(await blobClient.exists())) {
+    await blobClient.create();
+  }
+
+  const line =
+    JSON.stringify({ ...entry, at: new Date().toISOString() }) + "\n";
+  await blobClient.appendBlock(line, Buffer.byteLength(line));
+}
+
+// /log route (frontend -> proxy -> Azure)
+app.post("/log", express.json({ limit: "1mb" }), async (req, res) => {
+  try {
+    await appendToAzureBlob(req.body);
+    res.status(200).json({ ok: true });
+  } catch (e) {
+    console.error("Azure log error:", e);
+    res.status(500).json({ message: "Azure log failed", error: e.message });
+  }
+});
+
 app.listen(PORT, () => {
   console.log(`✅ Langdock streaming proxy listening on ${PORT}`);
 });
