@@ -9,22 +9,52 @@ const upload = multer(); // memory storage
 const app = express();
 const PORT = process.env.PORT || 3000;
 const LANGDOCK_API_KEY = process.env.LANGDOCK_API_KEY;
+
+// Support comma-separated list of origins
 const ALLOW_ORIGIN = process.env.ALLOW_ORIGIN || "*";
+const allowedOrigins =
+  ALLOW_ORIGIN === "*" ? "*" : ALLOW_ORIGIN.split(",").map((o) => o.trim());
 
 if (!LANGDOCK_API_KEY) {
   console.error("❌ Missing LANGDOCK_API_KEY");
   process.exit(1);
 }
 
-app.use(cors({ origin: ALLOW_ORIGIN, credentials: false }));
+// CORS configuration
+const corsOptions = {
+  origin: (origin, callback) => {
+    // Allow requests with no origin (like mobile apps or curl requests)
+    if (!origin) return callback(null, true);
+
+    // Allow all origins if "*" is set
+    if (allowedOrigins === "*") return callback(null, true);
+
+    // Check if origin is in allowed list
+    if (allowedOrigins.includes(origin)) {
+      callback(null, true);
+    } else {
+      callback(new Error(`Origin ${origin} not allowed by CORS`));
+    }
+  },
+  credentials: false,
+};
+
+app.use(cors(corsOptions));
 app.use(express.json({ limit: "2mb" }));
 
 // Health check
 app.get("/health", (_req, res) => res.status(200).send("ok"));
 
 // CORS preflight (if needed)
-app.options("*", (_req, res) => {
-  res.setHeader("Access-Control-Allow-Origin", ALLOW_ORIGIN);
+app.options("*", (req, res) => {
+  const origin = req.headers.origin;
+
+  if (allowedOrigins === "*") {
+    res.setHeader("Access-Control-Allow-Origin", "*");
+  } else if (origin && allowedOrigins.includes(origin)) {
+    res.setHeader("Access-Control-Allow-Origin", origin);
+  }
+
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
   res.sendStatus(204);
