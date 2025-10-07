@@ -1,7 +1,10 @@
 // server.js
 const express = require("express");
-const fetch = require("node-fetch"); // v2 OK for stream piping
+const fetch = require("node-fetch");
 const cors = require("cors");
+const multer = require("multer");
+const FormData = require("form-data");
+const upload = multer(); // memory storage
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -112,10 +115,38 @@ app.post("/assistant-json", async (req, res) => {
   }
 });
 
-// (Optional) attachment upload passthrough (multipart/form-data) if you plan to use attachments.
-// Use a multipart lib like busboy/multer here and forward to:
-// POST https://api.langdock.com/assistant/v1/attachment/upload
-// See docs: Upload Attachment API.
+// Upload attachment -> Langdock (multipart passthrough)
+app.post("/upload", upload.single("file"), async (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ message: "No file provided" });
+
+    const form = new FormData();
+    form.append("file", req.file.buffer, {
+      filename: req.file.originalname,
+      contentType: req.file.mimetype,
+      knownLength: req.file.size,
+    });
+
+    const ld = await fetch("https://api.langdock.com/attachment/v1/upload", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${process.env.LANGDOCK_API_KEY}`,
+        ...form.getHeaders(),
+      },
+      body: form,
+    });
+
+    const text = await ld.text();
+    res
+      .status(ld.status)
+      .type(ld.headers.get("content-type") || "application/json")
+      .send(text);
+  } catch (e) {
+    console.error("Upload proxy error:", e);
+    res.status(500).json({ message: "Upload failed", detail: e.message });
+  }
+});
+
 app.listen(PORT, () => {
   console.log(`✅ Langdock streaming proxy listening on ${PORT}`);
 });
