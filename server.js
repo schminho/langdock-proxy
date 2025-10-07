@@ -83,17 +83,11 @@ app.post("/assistant", async (req, res) => {
     // If upstream didn't return SSE, surface that body for debugging
     const ct = ldRes.headers.get("content-type") || "";
     if (!ct.includes("text/event-stream")) {
-      const nonSseBody = await ldRes.text().catch(() => "");
+      const bodyText = await ldRes.text().catch(() => "");
       return res
-        .status(502)
-        .type("application/json")
-        .send(
-          JSON.stringify({
-            message: "Expected SSE from Langdock",
-            contentType: ct,
-            body: nonSseBody,
-          })
-        );
+        .status(ldRes.status)
+        .type(ct || "application/json")
+        .send(bodyText);
     }
 
     // SSE headers
