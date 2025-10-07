@@ -51,6 +51,8 @@ app.post("/assistant", async (req, res) => {
       console.log(
         "[/assistant] asst:",
         body.assistantId,
+        "rootAttIds:",
+        Array.isArray(body.attachmentIds) ? body.attachmentIds.length : 0,
         "messages:",
         msgSummary.length,
         msgSummary
@@ -66,15 +68,32 @@ app.post("/assistant", async (req, res) => {
         headers: {
           Authorization: `Bearer ${LANGDOCK_API_KEY}`,
           "Content-Type": "application/json",
+          Accept: "text/event-stream", // <-- ask for SSE
         },
         body: JSON.stringify(body),
       }
     );
 
-    // Pass through status if non-200
-    if (!ldRes.ok && ldRes.status !== 200) {
+    // If upstream isn't OK, forward its body
+    if (!ldRes.ok) {
       const errText = await ldRes.text().catch(() => "");
       return res.status(ldRes.status).type("application/json").send(errText);
+    }
+
+    // If upstream didn't return SSE, surface that body for debugging
+    const ct = ldRes.headers.get("content-type") || "";
+    if (!ct.includes("text/event-stream")) {
+      const nonSseBody = await ldRes.text().catch(() => "");
+      return res
+        .status(502)
+        .type("application/json")
+        .send(
+          JSON.stringify({
+            message: "Expected SSE from Langdock",
+            contentType: ct,
+            body: nonSseBody,
+          })
+        );
     }
 
     // SSE headers
@@ -150,7 +169,7 @@ app.post("/upload", upload.single("file"), async (req, res) => {
     const ld = await fetch("https://api.langdock.com/attachment/v1/upload", {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${process.env.LANGDOCK_API_KEY}`,
+        Authorization: `Bearer ${LANGDOCK_API_KEY}`,
         ...form.getHeaders(),
       },
       body: form,
