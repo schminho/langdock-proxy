@@ -147,8 +147,8 @@ app.post("/upload", upload.single("file"), async (req, res) => {
   }
 });
 
-// --- Azure Blob Logging ---
-import { BlobServiceClient } from "@azure/storage-blob";
+// --- Azure Blob Logging (CommonJS) ---
+const { BlobServiceClient } = require("@azure/storage-blob");
 
 const AZURE_CONN = process.env.AZURE_STORAGE_CONNECTION_STRING;
 const CONTAINER_NAME = "logs";
@@ -165,7 +165,7 @@ async function appendToAzureBlob(entry) {
   const blobName = `logs-${today}.jsonl`;
   const blobClient = container.getAppendBlobClient(blobName);
 
-  // create blob if missing
+  // create append blob if missing
   if (!(await blobClient.exists())) {
     await blobClient.create();
   }
