@@ -33,11 +33,31 @@ app.options("*", (_req, res) => {
 // --- Main streaming endpoint: forwards to Langdock Assistant API ---
 app.post("/assistant", async (req, res) => {
   try {
-    // Expect: { assistantId, messages: [{role, content, attachmentIds?}, ...], stream: true }
-    const body = {
-      ...req.body,
-      stream: true, // enforce streaming from server side
-    };
+    const body = { ...req.body, stream: true };
+
+    // --- debug summary ---
+    try {
+      const msgSummary = Array.isArray(body.messages)
+        ? body.messages.map((m) => ({
+            role: m.role,
+            hasAttachments:
+              Array.isArray(m.attachmentIds) && m.attachmentIds.length > 0,
+            attCount: Array.isArray(m.attachmentIds)
+              ? m.attachmentIds.length
+              : 0,
+            contentPreview: (m.content || "").slice(0, 60),
+          }))
+        : [];
+      console.log(
+        "[/assistant] asst:",
+        body.assistantId,
+        "messages:",
+        msgSummary.length,
+        msgSummary
+      );
+    } catch (e) {
+      console.log("[/assistant] summary failed", e?.message);
+    }
 
     const ldRes = await fetch(
       "https://api.langdock.com/assistant/v1/chat/completions",
@@ -136,11 +156,35 @@ app.post("/upload", upload.single("file"), async (req, res) => {
       body: form,
     });
 
+    const ct = ld.headers.get("content-type") || "application/json";
     const text = await ld.text();
-    res
-      .status(ld.status)
-      .type(ld.headers.get("content-type") || "application/json")
-      .send(text);
+
+    console.log(
+      "[/upload] status:",
+      ld.status,
+      "ct:",
+      ct,
+      "body:",
+      text.slice(0, 300)
+    );
+
+    if (!ld.ok) {
+      return res.status(ld.status).type(ct).send(text);
+    }
+
+    // Normalize to always return { attachmentId }
+    let data = {};
+    try {
+      data = JSON.parse(text);
+    } catch {}
+    const attachmentId =
+      data.attachmentId ||
+      data.id ||
+      data?.attachment?.id ||
+      data?.result?.attachmentId ||
+      null;
+
+    return res.status(200).json({ attachmentId, raw: data });
   } catch (e) {
     console.error("Upload proxy error:", e);
     res.status(500).json({ message: "Upload failed", detail: e.message });
