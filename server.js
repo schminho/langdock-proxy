@@ -120,38 +120,48 @@ app.post("/assistant", async (req, res) => {
         .send(bodyText);
     }
 
-    // SSE headers
+    // --- SSE: unbuffered headers + immediate kick + robust teardown ---
     res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
     res.setHeader("Cache-Control", "no-cache, no-transform");
+    res.setHeader("Pragma", "no-cache");
     res.setHeader("Connection", "keep-alive");
-    res.setHeader("X-Accel-Buffering", "no"); // Disable nginx buffering if behind proxy
+    res.setHeader("X-Accel-Buffering", "no"); // disable nginx buffering
+    res.setHeader("Content-Encoding", "identity"); // prevent compression (often buffers)
+    res.flushHeaders?.();
 
-    // Flush headers immediately
-    if (res.flushHeaders) {
-      res.flushHeaders();
-    }
+    // Immediate heartbeat to start client rendering
+    res.write(":ok\n\n");
+    res.flush?.();
 
-    // Manual streaming with immediate write - DO NOT USE .pipe()
-    // This ensures each chunk is sent immediately without buffering
+    // If the client disconnects, stop reading from upstream and end our response
+    const close = () => {
+      try {
+        ldRes.body?.destroy?.();
+      } catch {}
+      try {
+        res.end();
+      } catch {}
+    };
+    req.on("close", close);
+    req.on("aborted", close);
+
+    // Manual streaming—forward chunks as they arrive
     ldRes.body.on("data", (chunk) => {
       res.write(chunk);
-      // Force flush if available (some Node versions)
-      if (res.flush) {
-        res.flush();
-      }
+      res.flush?.();
     });
 
+    // Upstream finished
     ldRes.body.on("end", () => {
+      res.write(":done\n\n"); // final heartbeat
       res.end();
     });
 
+    // Upstream error (single handler with logging)
     ldRes.body.on("error", (err) => {
       console.error("Stream error:", err);
-      if (!res.headersSent) {
-        res.status(500).json({ error: "Stream failed" });
-      } else {
-        res.end();
-      }
+      res.write(":error\n\n");
+      res.end();
     });
   } catch (err) {
     console.error("Proxy stream error:", err);
