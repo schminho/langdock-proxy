@@ -98,7 +98,7 @@ app.post("/assistant", async (req, res) => {
         headers: {
           Authorization: `Bearer ${LANGDOCK_API_KEY}`,
           "Content-Type": "application/json",
-          Accept: "text/event-stream", // <-- ask for SSE
+          Accept: "text/event-stream",
         },
         body: JSON.stringify(body),
       }
@@ -124,20 +124,35 @@ app.post("/assistant", async (req, res) => {
     res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
     res.setHeader("Cache-Control", "no-cache, no-transform");
     res.setHeader("Connection", "keep-alive");
-    res.flushHeaders?.();
+    res.setHeader("X-Accel-Buffering", "no"); // Disable nginx buffering if behind proxy
 
-    // Stream pipe
-    ldRes.body.pipe(res);
+    // Flush headers immediately
+    if (res.flushHeaders) {
+      res.flushHeaders();
+    }
 
-    // If you prefer manual read to transform lines, use a reader:
-    // const reader = ldRes.body.getReader();
-    // const encoder = new TextEncoder();
-    // for (;;) {
-    //   const { done, value } = await reader.read();
-    //   if (done) break;
-    //   res.write(value);
-    // }
-    // res.end();
+    // Manual streaming with immediate write - DO NOT USE .pipe()
+    // This ensures each chunk is sent immediately without buffering
+    ldRes.body.on("data", (chunk) => {
+      res.write(chunk);
+      // Force flush if available (some Node versions)
+      if (res.flush) {
+        res.flush();
+      }
+    });
+
+    ldRes.body.on("end", () => {
+      res.end();
+    });
+
+    ldRes.body.on("error", (err) => {
+      console.error("Stream error:", err);
+      if (!res.headersSent) {
+        res.status(500).json({ error: "Stream failed" });
+      } else {
+        res.end();
+      }
+    });
   } catch (err) {
     console.error("Proxy stream error:", err);
     if (!res.headersSent) {
