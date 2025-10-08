@@ -120,16 +120,22 @@ app.post("/assistant", async (req, res) => {
         .send(bodyText);
     }
 
-    // --- SSE: unbuffered headers + immediate kick + robust teardown ---
+    // --- SSE: unbuffered headers + anti-buffer padding + robust teardown ---
     res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
     res.setHeader("Cache-Control", "no-cache, no-transform");
     res.setHeader("Pragma", "no-cache");
     res.setHeader("Connection", "keep-alive");
-    res.setHeader("X-Accel-Buffering", "no"); // disable nginx buffering
-    res.setHeader("Content-Encoding", "identity"); // prevent compression (often buffers)
+    // strongly hint to proxies not to buffer or transform
+    res.setHeader("X-Accel-Buffering", "no");
+    res.setHeader("Content-Encoding", "identity");
+    res.setHeader("Vary", "Accept-Encoding");
+    res.removeHeader?.("Content-Length"); // ensure no fixed length
     res.flushHeaders?.();
 
-    // Immediate heartbeat to start client rendering
+    // Anti-buffer padding: some edges/CDNs won't flush small responses
+    // Sends ~2KB comment, then a retry hint and a heartbeat
+    res.write(`:${" ".repeat(2048)}\n`);
+    res.write("retry: 1000\n");
     res.write(":ok\n\n");
     res.flush?.();
 
@@ -201,6 +207,137 @@ app.post("/assistant-json", async (req, res) => {
     console.error("Proxy error:", err);
     res.status(500).json({ error: "Proxy failed", detail: err.message });
   }
+});
+
+// --- GET-based SSE endpoint: /assistant-stream?q=<urlencoded JSON> ---
+app.get("/assistant-stream", async (req, res) => {
+  let body = {};
+  try {
+    body = JSON.parse(req.query.q || "{}");
+  } catch {}
+  body.stream = true;
+
+  // Early guard: assistantId must be UUID (optional but helpful)
+  const UUID_RE =
+    /^(?:urn:uuid:)?[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$/;
+  if (!body.assistantId || !UUID_RE.test(body.assistantId)) {
+    return res.status(400).json({ error: "Invalid assistantId: must be UUID" });
+  }
+
+  // SSE headers (same anti-buffer strategy)
+  res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+  res.setHeader("Cache-Control", "no-cache, no-transform");
+  res.setHeader("Pragma", "no-cache");
+  res.setHeader("Connection", "keep-alive");
+  res.setHeader("X-Accel-Buffering", "no");
+  res.setHeader("Content-Encoding", "identity");
+  res.setHeader("Vary", "Accept-Encoding");
+  res.removeHeader?.("Content-Length");
+  res.flushHeaders?.();
+
+  res.write(`:${" ".repeat(2048)}\n`);
+  res.write("retry: 1000\n");
+  res.write(":ok\n\n");
+  res.flush?.();
+
+  // Upstream POST -> Langdock (requesting SSE)
+  const up = await fetch(
+    "https://api.langdock.com/assistant/v1/chat/completions",
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${LANGDOCK_API_KEY}`,
+        "Content-Type": "application/json",
+        Accept: "text/event-stream",
+      },
+      body: JSON.stringify(body),
+    }
+  );
+
+  if (!up.ok) {
+    const errText = await up.text().catch(() => "");
+    res.write(
+      `event: error\ndata: ${JSON.stringify({
+        status: up.status,
+        body: errText.slice(0, 300),
+      })}\n\n`
+    );
+    return res.end();
+  }
+
+  const ct = up.headers.get("content-type") || "";
+  if (!ct.includes("text/event-stream")) {
+    const bodyText = await up.text().catch(() => "");
+    res.write(
+      `event: error\ndata: ${JSON.stringify({
+        note: "upstream not SSE",
+        ct,
+        body: bodyText.slice(0, 300),
+      })}\n\n`
+    );
+    return res.end();
+  }
+
+  const close = () => {
+    try {
+      up.body?.destroy?.();
+    } catch {}
+    try {
+      res.end();
+    } catch {}
+  };
+  req.on("close", close);
+  req.on("aborted", close);
+
+  up.body.on("data", (chunk) => {
+    res.write(chunk);
+    res.flush?.();
+  });
+  up.body.on("end", () => {
+    res.write(":done\n\n");
+    res.end();
+  });
+  up.body.on("error", (err) => {
+    res.write(`:error ${err?.message || ""}\n\n`);
+    res.end();
+  });
+});
+
+// --- Minimal debug SSE to verify host-level streaming ---
+app.get("/debug-sse", (req, res) => {
+  res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+  res.setHeader("Cache-Control", "no-cache, no-transform");
+  res.setHeader("Pragma", "no-cache");
+  res.setHeader("Connection", "keep-alive");
+  res.setHeader("X-Accel-Buffering", "no");
+  res.setHeader("Content-Encoding", "identity");
+  res.setHeader("Vary", "Accept-Encoding");
+  res.removeHeader?.("Content-Length");
+  res.flushHeaders?.();
+
+  res.write(`:${" ".repeat(2048)}\n`);
+  res.write(":hello\n\n");
+  res.flush?.();
+
+  let i = 0;
+  const start = Date.now();
+  const tick = () => {
+    const line = `data: ${++i} @ ${Date.now() - start}ms\n\n`;
+    const ok = res.write(line);
+    res.flush?.();
+    if (i >= 10) return res.end();
+    if (!ok) res.once("drain", () => setTimeout(tick, 500));
+    else setTimeout(tick, 500);
+  };
+  tick();
+
+  const close = () => {
+    try {
+      res.end();
+    } catch {}
+  };
+  req.on("close", close);
+  req.on("aborted", close);
 });
 
 // Upload attachment -> Langdock (multipart passthrough)
