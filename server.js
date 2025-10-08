@@ -110,15 +110,11 @@ app.post("/assistant", async (req, res) => {
       return res.status(ldRes.status).type("application/json").send(errText);
     }
 
-    // If upstream didn't return SSE, surface that body for debugging
+    // NOTE: Upstream may be text/plain with custom framing (e.g., "0:", "2:", ...).
+    // Do NOT switch to .text(); it would buffer the entire body.
+    // We will just stream whatever bytes arrive and let the client parse per-line.
     const ct = ldRes.headers.get("content-type") || "";
-    if (!ct.includes("text/event-stream")) {
-      const bodyText = await ldRes.text().catch(() => "");
-      return res
-        .status(ldRes.status)
-        .type(ct || "application/json")
-        .send(bodyText);
-    }
+    console.log("[/assistant] upstream content-type:", ct);
 
     // --- SSE: unbuffered headers + anti-buffer padding + robust teardown ---
     res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
@@ -139,8 +135,19 @@ app.post("/assistant", async (req, res) => {
     res.write(":ok\n\n");
     res.flush?.();
 
+    // Heartbeat every 1s to keep intermediaries flushing
+    const hb = setInterval(() => {
+      try {
+        res.write(":hb\n\n");
+        res.flush?.();
+      } catch {}
+    }, 1000);
+
     // If the client disconnects, stop reading from upstream and end our response
     const close = () => {
+      try {
+        clearInterval(hb);
+      } catch {}
       try {
         ldRes.body?.destroy?.();
       } catch {}
@@ -159,14 +166,19 @@ app.post("/assistant", async (req, res) => {
 
     // Upstream finished
     ldRes.body.on("end", () => {
-      res.write(":done\n\n"); // final heartbeat
+      try {
+        clearInterval(hb);
+      } catch {}
+      res.write(":done\n\n");
       res.end();
     });
 
-    // Upstream error (single handler with logging)
     ldRes.body.on("error", (err) => {
       console.error("Stream error:", err);
-      res.write(":error\n\n");
+      try {
+        clearInterval(hb);
+      } catch {}
+      res.write(`:error ${err?.message || ""}\n\n`);
       res.end();
     });
   } catch (err) {
@@ -210,6 +222,7 @@ app.post("/assistant-json", async (req, res) => {
 });
 
 // --- GET-based SSE endpoint: /assistant-stream?q=<urlencoded JSON> ---
+// Streams even if upstream isn't SSE by re-framing lines into SSE "data:" frames.
 app.get("/assistant-stream", async (req, res) => {
   let body = {};
   try {
@@ -217,14 +230,14 @@ app.get("/assistant-stream", async (req, res) => {
   } catch {}
   body.stream = true;
 
-  // Early guard: assistantId must be UUID (optional but helpful)
+  // (Optional) validate assistantId early
   const UUID_RE =
     /^(?:urn:uuid:)?[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$/;
   if (!body.assistantId || !UUID_RE.test(body.assistantId)) {
     return res.status(400).json({ error: "Invalid assistantId: must be UUID" });
   }
 
-  // SSE headers (same anti-buffer strategy)
+  // SSE response headers
   res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
   res.setHeader("Cache-Control", "no-cache, no-transform");
   res.setHeader("Pragma", "no-cache");
@@ -235,12 +248,20 @@ app.get("/assistant-stream", async (req, res) => {
   res.removeHeader?.("Content-Length");
   res.flushHeaders?.();
 
+  // Anti-buffer padding + heartbeat
   res.write(`:${" ".repeat(2048)}\n`);
   res.write("retry: 1000\n");
   res.write(":ok\n\n");
   res.flush?.();
 
-  // Upstream POST -> Langdock (requesting SSE)
+  const hb = setInterval(() => {
+    try {
+      res.write(":hb\n\n");
+      res.flush?.();
+    } catch {}
+  }, 1000);
+
+  // Call upstream (requesting "stream")
   const up = await fetch(
     "https://api.langdock.com/assistant/v1/chat/completions",
     {
@@ -248,11 +269,14 @@ app.get("/assistant-stream", async (req, res) => {
       headers: {
         Authorization: `Bearer ${LANGDOCK_API_KEY}`,
         "Content-Type": "application/json",
-        Accept: "text/event-stream",
+        Accept: "text/event-stream", // ask for SSE if supported
       },
       body: JSON.stringify(body),
     }
   );
+
+  const ct = up.headers.get("content-type") || "";
+  console.log("[/assistant-stream] upstream content-type:", ct);
 
   if (!up.ok) {
     const errText = await up.text().catch(() => "");
@@ -265,20 +289,10 @@ app.get("/assistant-stream", async (req, res) => {
     return res.end();
   }
 
-  const ct = up.headers.get("content-type") || "";
-  if (!ct.includes("text/event-stream")) {
-    const bodyText = await up.text().catch(() => "");
-    res.write(
-      `event: error\ndata: ${JSON.stringify({
-        note: "upstream not SSE",
-        ct,
-        body: bodyText.slice(0, 300),
-      })}\n\n`
-    );
-    return res.end();
-  }
-
   const close = () => {
+    try {
+      clearInterval(hb);
+    } catch {}
     try {
       up.body?.destroy?.();
     } catch {}
@@ -289,15 +303,60 @@ app.get("/assistant-stream", async (req, res) => {
   req.on("close", close);
   req.on("aborted", close);
 
+  // If upstream is real SSE, pass-through
+  if (ct.includes("text/event-stream")) {
+    up.body.on("data", (chunk) => {
+      res.write(chunk);
+      res.flush?.();
+    });
+    up.body.on("end", () => {
+      try {
+        clearInterval(hb);
+      } catch {}
+      res.write(":done\n\n");
+      res.end();
+    });
+    up.body.on("error", (err) => {
+      try {
+        clearInterval(hb);
+      } catch {}
+      res.write(`:error ${err?.message || ""}\n\n`);
+      res.end();
+    });
+    return;
+  }
+
+  // Otherwise: re-frame upstream text/plain stream into SSE frames.
+  let carry = "";
   up.body.on("data", (chunk) => {
-    res.write(chunk);
+    const text = Buffer.isBuffer(chunk)
+      ? chunk.toString("utf8")
+      : String(chunk);
+    const parts = (carry + text).split(/\r?\n/);
+    carry = parts.pop() ?? "";
+    for (const lineRaw of parts) {
+      const line = lineRaw.trim();
+      if (!line) continue;
+      // Wrap each upstream line as an SSE data frame.
+      // Client-side EventSource sees it as e.data = original line.
+      res.write(`data: ${line}\n\n`);
+    }
     res.flush?.();
   });
+
   up.body.on("end", () => {
+    try {
+      clearInterval(hb);
+    } catch {}
+    if (carry.trim()) res.write(`data: ${carry.trim()}\n\n`);
     res.write(":done\n\n");
     res.end();
   });
+
   up.body.on("error", (err) => {
+    try {
+      clearInterval(hb);
+    } catch {}
     res.write(`:error ${err?.message || ""}\n\n`);
     res.end();
   });
