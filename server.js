@@ -461,25 +461,38 @@ const { BlobServiceClient } = require("@azure/storage-blob");
 const AZURE_CONN = process.env.AZURE_STORAGE_CONNECTION_STRING;
 const CONTAINER_NAME = "logs";
 
+function safePart(s) {
+  // keep it URL-safe & short for blob names
+  return String(s || "anon")
+    .toLowerCase()
+    .replace(/[^a-z0-9-]/g, "-")
+    .slice(0, 64);
+}
+
 async function appendToAzureBlob(entry) {
   if (!AZURE_CONN) throw new Error("Missing AZURE_STORAGE_CONNECTION_STRING");
   const blobService = BlobServiceClient.fromConnectionString(AZURE_CONN);
   const container = blobService.getContainerClient(CONTAINER_NAME);
-
-  // create container if missing
   await container.createIfNotExists();
 
-  const today = new Date().toISOString().slice(0, 10);
-  const blobName = `logs-${today}.jsonl`;
-  const blobClient = container.getAppendBlobClient(blobName);
+  // pick date from entry.at if provided, else now
+  const iso = (entry && entry.at) || new Date().toISOString();
+  const day = iso.slice(0, 10); // YYYY-MM-DD
 
-  // create append blob if missing
+  // use sessionId if present, else fall back to userEmail, else "anon"
+  const sessionPart = safePart(entry?.sessionId || entry?.userEmail || "anon");
+
+  // folder-like naming inside the "logs" container:
+  // e.g. logs/2025-10-08/37174234-44a7-4751-...jsonl
+  const blobName = `${day}/${sessionPart}.jsonl`;
+
+  const blobClient = container.getAppendBlobClient(blobName);
   if (!(await blobClient.exists())) {
     await blobClient.create();
   }
 
-  const line =
-    JSON.stringify({ ...entry, at: new Date().toISOString() }) + "\n";
+  // always ensure we stamp 'at' on the line
+  const line = JSON.stringify({ ...entry, at: iso }) + "\n";
   await blobClient.appendBlock(line, Buffer.byteLength(line));
 }
 
