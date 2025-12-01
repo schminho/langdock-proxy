@@ -404,9 +404,28 @@ app.post("/upload", upload.single("file"), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ message: "No file provided" });
 
+    // Log detailed file info for debugging
+    console.log("[/upload] Received file:", {
+      originalname: req.file.originalname,
+      mimetype: req.file.mimetype,
+      size: req.file.size,
+      encoding: req.file.encoding,
+    });
+
+    // Ensure filename has proper extension
+    let filename = req.file.originalname;
+    if (!filename || filename === "blob") {
+      // If no filename or generic "blob", try to add proper extension based on mimetype
+      const ext = req.file.mimetype.split("/")[1] || "bin";
+      filename = `file.${ext}`;
+      console.log(
+        `[/upload] Fixed filename from "${req.file.originalname}" to "${filename}"`
+      );
+    }
+
     const form = new FormData();
     form.append("file", req.file.buffer, {
-      filename: req.file.originalname,
+      filename: filename,
       contentType: req.file.mimetype,
       knownLength: req.file.size,
     });
@@ -424,15 +443,22 @@ app.post("/upload", upload.single("file"), async (req, res) => {
     const text = await ld.text();
 
     console.log(
-      "[/upload] status:",
+      "[/upload] Response - status:",
       ld.status,
       "ct:",
       ct,
       "body:",
-      text.slice(0, 300)
+      text.slice(0, 500)
     );
 
     if (!ld.ok) {
+      console.error("[/upload] Upload failed:", {
+        status: ld.status,
+        filename: filename,
+        mimetype: req.file.mimetype,
+        size: req.file.size,
+        response: text.slice(0, 500),
+      });
       return res.status(ld.status).type(ct).send(text);
     }
 
@@ -447,6 +473,14 @@ app.post("/upload", upload.single("file"), async (req, res) => {
       data?.attachment?.id ||
       data?.result?.attachmentId ||
       null;
+
+    console.log("[/upload] Success:", {
+      attachmentId,
+      filename: filename,
+      mimetype: req.file.mimetype,
+      size: req.file.size,
+      rawResponse: data,
+    });
 
     return res.status(200).json({ attachmentId, raw: data });
   } catch (e) {
