@@ -524,7 +524,7 @@ app.post("/upload", upload.single("file"), async (req, res) => {
     try {
       data = JSON.parse(text);
     } catch {}
-    
+
     const attachmentId =
       data.attachmentId ||
       data.id ||
