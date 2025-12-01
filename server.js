@@ -75,6 +75,7 @@ app.post("/assistant", async (req, res) => {
             attCount: Array.isArray(m.attachmentIds)
               ? m.attachmentIds.length
               : 0,
+            attachmentIds: m.attachmentIds || [],
             contentPreview: (m.content || "").slice(0, 60),
           }))
         : [];
@@ -86,6 +87,20 @@ app.post("/assistant", async (req, res) => {
         "messages:",
         msgSummary.length,
         msgSummary
+      );
+
+      // Log full request body for debugging (truncate content for readability)
+      const debugBody = {
+        ...body,
+        messages: body.messages?.map((m) => ({
+          ...m,
+          content:
+            m.content?.slice(0, 100) + (m.content?.length > 100 ? "..." : ""),
+        })),
+      };
+      console.log(
+        "[/assistant] Full request body:",
+        JSON.stringify(debugBody, null, 2)
       );
     } catch (e) {
       console.log("[/assistant] summary failed", e?.message);
