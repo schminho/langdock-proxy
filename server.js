@@ -174,7 +174,16 @@ app.post("/assistant", async (req, res) => {
     req.on("aborted", close);
 
     // Manual streaming—forward chunks as they arrive
+    let responseBuffer = "";
     ldRes.body.on("data", (chunk) => {
+      const chunkStr = chunk.toString();
+      responseBuffer += chunkStr;
+
+      // Log first 500 chars of response to see what model says
+      if (responseBuffer.length <= 500) {
+        console.log("[/assistant] Response chunk:", chunkStr.slice(0, 200));
+      }
+
       res.write(chunk);
       res.flush?.();
     });
@@ -414,6 +423,39 @@ app.get("/debug-sse", (req, res) => {
   req.on("aborted", close);
 });
 
+// Helper endpoint to get assistant details
+app.get("/assistant/:assistantId", async (req, res) => {
+  try {
+    const { assistantId } = req.params;
+    const ldRes = await fetch(
+      `https://api.langdock.com/assistant/v1/assistants/${assistantId}`,
+      {
+        method: "GET",
+        headers: {
+          Authorization: `Bearer ${LANGDOCK_API_KEY}`,
+          "Content-Type": "application/json",
+        },
+      }
+    );
+    const text = await ldRes.text();
+    const ct = ldRes.headers.get("content-type") || "application/json";
+
+    console.log(
+      "[/assistant/:id] status:",
+      ldRes.status,
+      "body:",
+      text.slice(0, 500)
+    );
+
+    res.status(ldRes.status).type(ct).send(text);
+  } catch (err) {
+    console.error("Get assistant error:", err);
+    res
+      .status(500)
+      .json({ error: "Failed to get assistant", detail: err.message });
+  }
+});
+
 // Upload attachment -> Langdock (multipart passthrough)
 app.post("/upload", upload.single("file"), async (req, res) => {
   try {
@@ -489,15 +531,33 @@ app.post("/upload", upload.single("file"), async (req, res) => {
       data?.result?.attachmentId ||
       null;
 
+    const url = data.url || data?.attachment?.url || null;
+    const filePath = data.filePath || data?.attachment?.filePath || null;
+
     console.log("[/upload] Success:", {
       attachmentId,
+      url,
+      filePath,
       filename: filename,
       mimetype: req.file.mimetype,
       size: req.file.size,
       rawResponse: data,
     });
 
-    return res.status(200).json({ attachmentId, raw: data });
+    // Return extended metadata that frontend can use
+    // IMPORTANT: For vision models (images), include the URL in attachments array
+    return res.status(200).json({
+      attachmentId,
+      id: attachmentId,
+      url,
+      filePath,
+      type: req.file.mimetype,
+      mimeType: req.file.mimetype,
+      filename: filename,
+      name: filename,
+      size: req.file.size,
+      raw: data,
+    });
   } catch (e) {
     console.error("Upload proxy error:", e);
     res.status(500).json({ message: "Upload failed", detail: e.message });
