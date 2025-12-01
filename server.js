@@ -523,7 +523,15 @@ app.post("/upload", upload.single("file"), async (req, res) => {
     let data = {};
     try {
       data = JSON.parse(text);
-    } catch {}
+    } catch (parseError) {
+      console.error("[/upload] JSON parse error:", parseError.message);
+      console.error("[/upload] Raw response:", text);
+      return res.status(500).json({
+        message: "Failed to parse upload response",
+        detail: parseError.message,
+        rawResponse: text.slice(0, 200),
+      });
+    }
 
     const attachmentId =
       data.attachmentId ||
@@ -532,15 +540,21 @@ app.post("/upload", upload.single("file"), async (req, res) => {
       data?.result?.attachmentId ||
       null;
 
+    if (!attachmentId) {
+      console.error("[/upload] No attachmentId found in response:", data);
+      return res.status(500).json({
+        message: "No attachmentId in upload response",
+        rawResponse: data,
+      });
+    }
+
     console.log("[/upload] Success:", {
       attachmentId,
       filename: filename,
       mimetype: req.file.mimetype,
       size: req.file.size,
       rawResponse: data,
-    });
-
-    // Return response matching Langdock documentation format
+    }); // Return response matching Langdock documentation format
     return res.status(200).json({
       attachmentId,
       file: {
