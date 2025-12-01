@@ -519,11 +519,12 @@ app.post("/upload", upload.single("file"), async (req, res) => {
       return res.status(ld.status).type(ct).send(text);
     }
 
-    // Normalize to always return { attachmentId }
+    // Normalize to always return { attachmentId, file }
     let data = {};
     try {
       data = JSON.parse(text);
     } catch {}
+    
     const attachmentId =
       data.attachmentId ||
       data.id ||
@@ -531,32 +532,22 @@ app.post("/upload", upload.single("file"), async (req, res) => {
       data?.result?.attachmentId ||
       null;
 
-    const url = data.url || data?.attachment?.url || null;
-    const filePath = data.filePath || data?.attachment?.filePath || null;
-
     console.log("[/upload] Success:", {
       attachmentId,
-      url,
-      filePath,
       filename: filename,
       mimetype: req.file.mimetype,
       size: req.file.size,
       rawResponse: data,
     });
 
-    // Return extended metadata that frontend can use
-    // IMPORTANT: For vision models (images), include the URL in attachments array
+    // Return response matching Langdock documentation format
     return res.status(200).json({
       attachmentId,
-      id: attachmentId,
-      url,
-      filePath,
-      type: req.file.mimetype,
-      mimeType: req.file.mimetype,
-      filename: filename,
-      name: filename,
-      size: req.file.size,
-      raw: data,
+      file: {
+        name: filename,
+        mimeType: req.file.mimetype,
+        sizeInBytes: req.file.size,
+      },
     });
   } catch (e) {
     console.error("Upload proxy error:", e);
