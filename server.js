@@ -740,16 +740,17 @@ app.post("/upload-image", upload.single("file"), async (req, res) => {
     }
 
     const blobService = BlobServiceClient.fromConnectionString(AZURE_CONN);
-    const container = blobService.getContainerClient("images");
+    const container = blobService.getContainerClient(CONTAINER_NAME); // use "logs" container
 
-    // Create container if it doesn't exist (private container)
+    // Create container if it doesn't exist
     await container.createIfNotExists();
 
-    // Generate unique filename
+    // Generate unique filename in today's folder
+    const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
     const timestamp = Date.now();
     const randomStr = Math.random().toString(36).substring(2, 15);
     const ext = req.file.mimetype.split("/")[1] || "jpg";
-    const blobName = `${timestamp}-${randomStr}.${ext}`;
+    const blobName = `${today}/${timestamp}-${randomStr}.${ext}`;
 
     const blockBlobClient = container.getBlockBlobClient(blobName);
 
@@ -767,7 +768,7 @@ app.post("/upload-image", upload.single("file"), async (req, res) => {
     } = require("@azure/storage-blob");
     const sasToken = generateBlobSASQueryParameters(
       {
-        containerName: "images",
+        containerName: CONTAINER_NAME,
         blobName: blobName,
         permissions: BlobSASPermissions.parse("r"), // read-only
         startsOn: new Date(),
