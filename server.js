@@ -742,8 +742,8 @@ app.post("/upload-image", upload.single("file"), async (req, res) => {
     const blobService = BlobServiceClient.fromConnectionString(AZURE_CONN);
     const container = blobService.getContainerClient("images");
 
-    // Create container if it doesn't exist (publicly accessible for vision API)
-    await container.createIfNotExists({ access: "blob" });
+    // Create container if it doesn't exist (private container)
+    await container.createIfNotExists();
 
     // Generate unique filename
     const timestamp = Date.now();
@@ -760,7 +760,17 @@ app.post("/upload-image", upload.single("file"), async (req, res) => {
       },
     });
 
-    const imageUrl = blockBlobClient.url;
+    // Generate SAS token URL (valid for 24 hours)
+    const { BlobSASPermissions, generateBlobSASQueryParameters } = require("@azure/storage-blob");
+    const sasToken = generateBlobSASQueryParameters({
+      containerName: "images",
+      blobName: blobName,
+      permissions: BlobSASPermissions.parse("r"), // read-only
+      startsOn: new Date(),
+      expiresOn: new Date(new Date().valueOf() + 24 * 60 * 60 * 1000), // 24 hours
+    }, blobService.credential).toString();
+
+    const imageUrl = `${blockBlobClient.url}?${sasToken}`;
 
     console.log("[/upload-image] Success:", {
       blobName,
