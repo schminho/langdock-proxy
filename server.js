@@ -761,14 +761,20 @@ app.post("/upload-image", upload.single("file"), async (req, res) => {
     });
 
     // Generate SAS token URL (valid for 24 hours)
-    const { BlobSASPermissions, generateBlobSASQueryParameters } = require("@azure/storage-blob");
-    const sasToken = generateBlobSASQueryParameters({
-      containerName: "images",
-      blobName: blobName,
-      permissions: BlobSASPermissions.parse("r"), // read-only
-      startsOn: new Date(),
-      expiresOn: new Date(new Date().valueOf() + 24 * 60 * 60 * 1000), // 24 hours
-    }, blobService.credential).toString();
+    const {
+      BlobSASPermissions,
+      generateBlobSASQueryParameters,
+    } = require("@azure/storage-blob");
+    const sasToken = generateBlobSASQueryParameters(
+      {
+        containerName: "images",
+        blobName: blobName,
+        permissions: BlobSASPermissions.parse("r"), // read-only
+        startsOn: new Date(),
+        expiresOn: new Date(new Date().valueOf() + 24 * 60 * 60 * 1000), // 24 hours
+      },
+      blobService.credential
+    ).toString();
 
     const imageUrl = `${blockBlobClient.url}?${sasToken}`;
 
