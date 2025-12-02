@@ -711,6 +711,79 @@ app.post("/upload", upload.single("file"), async (req, res) => {
   }
 });
 
+// Upload image to Azure Blob Storage (for vision API)
+app.post("/upload-image", upload.single("file"), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ message: "No file provided" });
+    }
+
+    // Validate it's an image
+    if (!req.file.mimetype.startsWith("image/")) {
+      return res.status(400).json({ 
+        message: "Only image files are supported",
+        receivedType: req.file.mimetype 
+      });
+    }
+
+    console.log("[/upload-image] Received file:", {
+      originalname: req.file.originalname,
+      mimetype: req.file.mimetype,
+      size: req.file.size,
+    });
+
+    if (!AZURE_CONN) {
+      return res.status(500).json({ 
+        message: "Azure Storage not configured",
+        detail: "AZURE_STORAGE_CONNECTION_STRING is missing" 
+      });
+    }
+
+    const blobService = BlobServiceClient.fromConnectionString(AZURE_CONN);
+    const container = blobService.getContainerClient("images");
+    
+    // Create container if it doesn't exist (publicly accessible for vision API)
+    await container.createIfNotExists({ access: "blob" });
+
+    // Generate unique filename
+    const timestamp = Date.now();
+    const randomStr = Math.random().toString(36).substring(2, 15);
+    const ext = req.file.mimetype.split("/")[1] || "jpg";
+    const blobName = `${timestamp}-${randomStr}.${ext}`;
+
+    const blockBlobClient = container.getBlockBlobClient(blobName);
+    
+    // Upload the image
+    await blockBlobClient.upload(req.file.buffer, req.file.size, {
+      blobHTTPHeaders: {
+        blobContentType: req.file.mimetype,
+      },
+    });
+
+    const imageUrl = blockBlobClient.url;
+
+    console.log("[/upload-image] Success:", {
+      blobName,
+      url: imageUrl,
+      size: req.file.size,
+    });
+
+    return res.status(200).json({
+      url: imageUrl,
+      imageUrl: imageUrl,
+      blobName,
+      mimeType: req.file.mimetype,
+      sizeInBytes: req.file.size,
+    });
+  } catch (e) {
+    console.error("[/upload-image] Error:", e);
+    res.status(500).json({ 
+      message: "Image upload failed", 
+      detail: e.message 
+    });
+  }
+});
+
 // --- Azure Blob Logging (CommonJS) ---
 const { BlobServiceClient } = require("@azure/storage-blob");
 
