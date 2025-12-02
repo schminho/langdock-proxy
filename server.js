@@ -60,6 +60,148 @@ app.options("*", (req, res) => {
   res.sendStatus(204);
 });
 
+// --- OpenAI-compatible Chat Completion endpoint (supports vision/images) ---
+app.post("/chat/completions", async (req, res) => {
+  try {
+    const body = { ...req.body, stream: req.body.stream ?? true };
+    const region = req.query.region || "eu"; // default to EU region
+
+    // --- debug summary ---
+    try {
+      const msgSummary = Array.isArray(body.messages)
+        ? body.messages.map((m) => {
+            const hasImages =
+              Array.isArray(m.content) &&
+              m.content.some((c) => c.type === "image_url");
+            return {
+              role: m.role,
+              hasImages,
+              contentType: typeof m.content === "string" ? "text" : "array",
+              contentPreview:
+                typeof m.content === "string"
+                  ? m.content.slice(0, 60)
+                  : `[${m.content?.length || 0} items]`,
+            };
+          })
+        : [];
+      console.log(
+        "[/chat/completions] model:",
+        body.model,
+        "region:",
+        region,
+        "stream:",
+        body.stream,
+        "messages:",
+        msgSummary.length,
+        msgSummary
+      );
+    } catch (e) {
+      console.log("[/chat/completions] summary failed", e?.message);
+    }
+
+    const ldRes = await fetch(
+      `https://api.langdock.com/openai/${region}/v1/chat/completions`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${LANGDOCK_API_KEY}`,
+          "Content-Type": "application/json",
+          Accept: body.stream ? "text/event-stream" : "application/json",
+        },
+        body: JSON.stringify(body),
+      }
+    );
+
+    // If upstream isn't OK, forward its body
+    if (!ldRes.ok) {
+      const errText = await ldRes.text().catch(() => "");
+      return res.status(ldRes.status).type("application/json").send(errText);
+    }
+
+    const ct = ldRes.headers.get("content-type") || "";
+    console.log("[/chat/completions] upstream content-type:", ct);
+
+    // If not streaming, just return the JSON response
+    if (!body.stream) {
+      const text = await ldRes.text();
+      return res.status(200).type(ct).send(text);
+    }
+
+    // --- SSE: unbuffered headers + anti-buffer padding + robust teardown ---
+    res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+    res.setHeader("Cache-Control", "no-cache, no-transform");
+    res.setHeader("Pragma", "no-cache");
+    res.setHeader("Connection", "keep-alive");
+    res.setHeader("X-Accel-Buffering", "no");
+    res.setHeader("Content-Encoding", "identity");
+    res.setHeader("Vary", "Accept-Encoding");
+    res.removeHeader?.("Content-Length");
+    res.flushHeaders?.();
+
+    // Anti-buffer padding
+    res.write(`:${" ".repeat(2048)}\n`);
+    res.write("retry: 1000\n");
+    res.write(":ok\n\n");
+    res.flush?.();
+
+    // Heartbeat every 1s
+    const hb = setInterval(() => {
+      try {
+        res.write(":hb\n\n");
+        res.flush?.();
+      } catch {}
+    }, 1000);
+
+    const close = () => {
+      try {
+        clearInterval(hb);
+      } catch {}
+      try {
+        ldRes.body?.destroy?.();
+      } catch {}
+      try {
+        res.end();
+      } catch {}
+    };
+    req.on("close", close);
+    req.on("aborted", close);
+
+    // Forward chunks as they arrive
+    ldRes.body.on("data", (chunk) => {
+      res.write(chunk);
+      res.flush?.();
+    });
+
+    ldRes.body.on("end", () => {
+      try {
+        clearInterval(hb);
+      } catch {}
+      res.write(":done\n\n");
+      res.end();
+    });
+
+    ldRes.body.on("error", (err) => {
+      console.error("[/chat/completions] Stream error:", err);
+      try {
+        clearInterval(hb);
+      } catch {}
+      res.write(`:error ${err?.message || ""}\n\n`);
+      res.end();
+    });
+  } catch (err) {
+    console.error("[/chat/completions] Proxy error:", err);
+    if (!res.headersSent) {
+      res
+        .status(500)
+        .json({ error: "Chat completion proxy failed", detail: err.message });
+    } else {
+      try {
+        res.end();
+      } catch (_) {}
+    }
+  }
+});
+
 // --- Main streaming endpoint: forwards to Langdock Assistant API ---
 app.post("/assistant", async (req, res) => {
   try {
