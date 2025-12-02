@@ -720,9 +720,9 @@ app.post("/upload-image", upload.single("file"), async (req, res) => {
 
     // Validate it's an image
     if (!req.file.mimetype.startsWith("image/")) {
-      return res.status(400).json({ 
+      return res.status(400).json({
         message: "Only image files are supported",
-        receivedType: req.file.mimetype 
+        receivedType: req.file.mimetype,
       });
     }
 
@@ -733,15 +733,15 @@ app.post("/upload-image", upload.single("file"), async (req, res) => {
     });
 
     if (!AZURE_CONN) {
-      return res.status(500).json({ 
+      return res.status(500).json({
         message: "Azure Storage not configured",
-        detail: "AZURE_STORAGE_CONNECTION_STRING is missing" 
+        detail: "AZURE_STORAGE_CONNECTION_STRING is missing",
       });
     }
 
     const blobService = BlobServiceClient.fromConnectionString(AZURE_CONN);
     const container = blobService.getContainerClient("images");
-    
+
     // Create container if it doesn't exist (publicly accessible for vision API)
     await container.createIfNotExists({ access: "blob" });
 
@@ -752,7 +752,7 @@ app.post("/upload-image", upload.single("file"), async (req, res) => {
     const blobName = `${timestamp}-${randomStr}.${ext}`;
 
     const blockBlobClient = container.getBlockBlobClient(blobName);
-    
+
     // Upload the image
     await blockBlobClient.upload(req.file.buffer, req.file.size, {
       blobHTTPHeaders: {
@@ -777,9 +777,9 @@ app.post("/upload-image", upload.single("file"), async (req, res) => {
     });
   } catch (e) {
     console.error("[/upload-image] Error:", e);
-    res.status(500).json({ 
-      message: "Image upload failed", 
-      detail: e.message 
+    res.status(500).json({
+      message: "Image upload failed",
+      detail: e.message,
     });
   }
 });
